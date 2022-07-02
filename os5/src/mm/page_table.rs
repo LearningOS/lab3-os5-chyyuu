@@ -1,5 +1,3 @@
-//! Implementation of [`PageTableEntry`] and [`PageTable`].
-
 use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::string::String;
 use alloc::vec;
@@ -7,7 +5,6 @@ use alloc::vec::Vec;
 use bitflags::*;
 
 bitflags! {
-    /// page table entry flags
     pub struct PTEFlags: u8 {
         const V = 1 << 0;
         const R = 1 << 1;
@@ -22,7 +19,6 @@ bitflags! {
 
 #[derive(Copy, Clone)]
 #[repr(C)]
-/// page table entry structure
 pub struct PageTableEntry {
     pub bits: usize,
 }
@@ -56,7 +52,6 @@ impl PageTableEntry {
     }
 }
 
-/// page table structure
 pub struct PageTable {
     root_ppn: PhysPageNum,
     frames: Vec<FrameTracker>,
@@ -144,7 +139,6 @@ impl PageTable {
     }
 }
 
-/// translate a pointer to a mutable u8 Vec through page table
 pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;

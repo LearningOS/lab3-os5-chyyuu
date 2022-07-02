@@ -1,14 +1,12 @@
-//! Process management syscalls
-
-use crate::loader::get_app_data_by_name;
-use crate::mm::{translated_refmut, translated_str};
-use crate::task::{
-    add_task, current_task, current_user_token, exit_current_and_run_next,
-    suspend_current_and_run_next, TaskStatus,
-};
-use crate::timer::get_time_us;
-use alloc::sync::Arc;
 use crate::config::MAX_SYSCALL_NUM;
+use crate::task::{
+    add_task, current_task, exit_current_and_run_next, suspend_current_and_run_next, get_task_info,
+    current_user_token, memory_alloc, memory_free, TaskStatus, TaskControlBlock, set_task_priority
+};
+use crate::mm::{VirtAddr, PhysAddr, PageTable, translated_refmut, translated_str};
+use crate::timer::{get_time_us};
+use crate::loader::get_app_data_by_name;
+use alloc::sync::Arc;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -30,7 +28,6 @@ pub fn sys_exit(exit_code: i32) -> ! {
     panic!("Unreachable in sys_exit!");
 }
 
-/// current task gives up resources for other tasks
 pub fn sys_yield() -> isize {
     suspend_current_and_run_next();
     0
@@ -40,7 +37,6 @@ pub fn sys_getpid() -> isize {
     current_task().unwrap().pid.0 as isize
 }
 
-/// Syscall Fork which returns 0 for child process and child_pid for parent process
 pub fn sys_fork() -> isize {
     let current_task = current_task().unwrap();
     let new_task = current_task.fork();
@@ -55,7 +51,6 @@ pub fn sys_fork() -> isize {
     new_pid as isize
 }
 
-/// Syscall Exec which accepts the elf path
 pub fn sys_exec(path: *const u8) -> isize {
     let token = current_user_token();
     let path = translated_str(token, path);
@@ -106,39 +101,84 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 }
 
 // YOUR JOB: 引入虚地址后重写 sys_get_time
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     let _us = get_time_us();
-    // unsafe {
-    //     *ts = TimeVal {
-    //         sec: us / 1_000_000,
-    //         usec: us % 1_000_000,
-    //     };
-    // }
+    let t = _us / 1000;
+    let token = current_user_token();
+    let page_table = PageTable::from_token(token);
+    let va = VirtAddr::from(ts as usize);
+    let vpn = va.floor();
+    let ppn = page_table.translate(vpn).unwrap().ppn();
+    let buf = ppn.get_bytes_array();
+    let sec = t / 1000;
+    let usec = t % 1000 * 1000;
+    let offset = va.page_offset();
+
+    buf[offset+0] = (sec & 0xff) as u8;
+    buf[offset+1] = ((sec >> 8) & 0xff) as u8;
+    buf[offset+2] = ((sec >> 16) & 0xff) as u8;
+    buf[offset+3] = ((sec >> 24) & 0xff) as u8;
+
+    buf[offset+8] = (usec & 0xff) as u8;
+    buf[offset+9] = ((usec >> 8) & 0xff) as u8;
+    buf[offset+10] = ((usec >> 16) & 0xff) as u8;
+    buf[offset+11] = ((usec >> 24) & 0xff) as u8;
     0
 }
 
-// YOUR JOB: 引入虚地址后重写 sys_task_info
-pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
-    -1
+// CLUE: 从 ch4 开始不再对调度算法进行测试~
+pub fn sys_set_priority(pri: isize) -> isize {
+    if pri < 2{
+        return -1;
+    }
+    set_task_priority(pri as usize);
+    pri as isize
 }
 
-// YOUR JOB: 实现sys_set_priority，为任务添加优先级
-pub fn sys_set_priority(_prio: isize) -> isize {
-    -1
-}
 
 // YOUR JOB: 扩展内核以实现 sys_mmap 和 sys_munmap
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    -1
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
+    memory_alloc(start, len, port)
 }
 
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    -1
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    memory_free(start, len)
 }
 
-//
+pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
+    let token = current_user_token();
+    let page_table = PageTable::from_token(token);
+    let va = VirtAddr::from(ti as usize);
+    let vpn = va.floor();
+    let ppn = page_table.translate(vpn).unwrap().ppn();
+    let offset = va.page_offset();
+    let pa: PhysAddr = ppn.into();
+    unsafe {
+        let task_info = ((pa.0 + offset) as *mut TaskInfo).as_mut().unwrap();
+        let tmp = get_task_info();
+        *task_info = tmp;
+    }
+    0
+}
+
 // YOUR JOB: 实现 sys_spawn 系统调用
-// ALERT: 注意在实现 SPAWN 时不需要复制父进程地址空间，SPAWN != FORK + EXEC 
+// ALERT: 注意在实现 SPAWN 时不需要复制父进程地址空间，SPAWN != FORK + EXEC
 pub fn sys_spawn(_path: *const u8) -> isize {
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, _path);
+    return if let Some(data) = get_app_data_by_name(path.as_str()) {
+        let new_task: Arc<TaskControlBlock> = Arc::new(TaskControlBlock::new(data));
+        let mut new_inner = new_task.inner_exclusive_access();
+        let parent = current_task().unwrap();
+        let mut parent_inner = parent.inner_exclusive_access();
+        new_inner.parent = Some(Arc::downgrade(&parent));
+        parent_inner.children.push(new_task.clone());
+        drop(new_inner);
+        drop(parent_inner);
+        let new_pid = new_task.pid.0;
+        add_task(new_task);
+        new_pid as isize
+    } else {
+        -1
+    }
 }

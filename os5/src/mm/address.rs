@@ -1,4 +1,3 @@
-//! Implementation of physical and virtual address and page number.
 use super::PageTableEntry;
 use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use core::fmt::{self, Debug, Formatter};
@@ -177,7 +176,6 @@ impl StepByOne for VirtPageNum {
 }
 
 #[derive(Copy, Clone)]
-/// a simple range structure for type T
 pub struct SimpleRange<T>
 where
     T: StepByOne + Copy + PartialEq + PartialOrd + Debug,
@@ -210,7 +208,6 @@ where
         SimpleRangeIterator::new(self.l, self.r)
     }
 }
-/// iterator for the simple range structure
 pub struct SimpleRangeIterator<T>
 where
     T: StepByOne + Copy + PartialEq + PartialOrd + Debug,
@@ -241,6 +238,4 @@ where
         }
     }
 }
-
-/// a simple range structure for virtual page number
 pub type VPNRange = SimpleRange<VirtPageNum>;
